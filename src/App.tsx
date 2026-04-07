@@ -330,8 +330,8 @@ export default function App() {
           <p className="text-sm font-semibold uppercase tracking-[0.25em] text-cyan-300">Proyectos</p>
           <h2 className="mt-3 text-3xl font-bold sm:text-4xl">Trabajo real, no solo promesas</h2>
           <p className="mt-4 text-slate-300">
-            Estos proyectos reflejan trabajo real en operacion, integraciones, automatizacion y productos digitales en
-            produccion.
+            Estos proyectos reflejan trabajo real en operación, integraciones, automatización y productos digitales en
+            producción.
           </p>
         </div>
 
@@ -380,10 +380,10 @@ export default function App() {
           <div className="grid gap-10 lg:grid-cols-[1.1fr_0.9fr]">
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.25em] text-cyan-300">Servicios</p>
-              <h2 className="mt-3 text-3xl font-bold sm:text-4xl">Desarrollo con enfoque practico</h2>
+              <h2 className="mt-3 text-3xl font-bold sm:text-4xl">Desarrollo con enfoque práctico</h2>
               <p className="mt-4 max-w-2xl text-slate-300">
-                Desde landing pages hasta sistemas internos: tecnologia orientada a resultados medibles, no a features que
-                nadie usa despues del lanzamiento.
+                Desde landing pages hasta sistemas internos: tecnología orientada a resultados medibles, no a features que
+                nadie usa después del lanzamiento.
               </p>
             </div>
 
