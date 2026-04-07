@@ -91,6 +91,13 @@ export default function App() {
       tag: "Custom Dev",
       impact: "Acelera ejecución diaria con software adaptado a procesos del negocio.",
     },
+    {
+      title: "Mini Trep para elecciones generales Honduras 2025",
+      desc: "Sistema de seguimiento y reporte de resultados electorales en tiempo real.",
+      tag: "Elecciones · Honduras · Tecnología",
+      impact: "Mejoró la transparencia y eficiencia en el conteo de votos.",
+      link: "https://trep.hondu.tech/",
+    }
   ];
 
   const quickBullets = [
