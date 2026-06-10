@@ -1,5 +1,6 @@
 ﻿import { useMemo, useState } from 'react';
 import Logo from './assets/logo-hero.png';
+import WorldCupPredictor from './components/WorldCupPredictor';
 
 export default function App() {
   type Project = {
@@ -294,6 +295,12 @@ export default function App() {
                   Ver servicios
                 </a>
                 <a
+                  href="#worldcup"
+                  className="rounded-2xl border border-cyan-300/40 bg-cyan-300/10 px-6 py-3 font-semibold text-cyan-100 transition hover:bg-cyan-300/20"
+                >
+                  Probar World Cup Predictor
+                </a>
+                <a
                   href="#passwords"
                   className="rounded-2xl border border-white/15 bg-white/5 px-6 py-3 font-semibold text-white transition hover:bg-white/10"
                 >
@@ -397,6 +404,8 @@ export default function App() {
           </div>
         </div>
       </section>
+
+      <WorldCupPredictor />
 
       <section id="passwords" className="mx-auto max-w-7xl px-6 py-16 lg:px-8">
         <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr]">
