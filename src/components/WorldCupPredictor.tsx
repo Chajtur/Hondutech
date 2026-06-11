@@ -141,24 +141,22 @@ const resolveSlotTeam = (
 const buildNextRound = (
   source: KnockoutMatch[],
   picks: KnockoutPickMap,
-  sourcePrefix: string,
   targetPrefix: string,
   label: string,
 ): KnockoutMatch[] => {
   const participants = source.map((match, index) => {
-    const matchId = `${sourcePrefix}-${index + 1}`;
     const locked = match.officialWinnerTeamId;
     if (locked && (locked === match.home.id || locked === match.away.id)) {
       return locked === match.home.id ? match.home : match.away;
     }
 
-    const selected = picks[matchId];
+    const selected = picks[match.id];
     const valid = selected === match.home.id || selected === match.away.id;
     if (valid) {
       return selected === match.home.id ? match.home : match.away;
     }
 
-    return createUnknownTeam(`Ganador ${sourcePrefix.toUpperCase()} ${index + 1}`);
+    return createUnknownTeam(`Ganador ${match.label || `${targetPrefix.toUpperCase()} ${index + 1}`}`);
   });
 
   const list: KnockoutMatch[] = [];
@@ -292,10 +290,10 @@ export default function WorldCupPredictor() {
     });
   }, [tablesByGroup, thirdByGroup]);
 
-  const roundOf16 = useMemo(() => buildNextRound(roundOf32, knockoutPicks, 'r32', 'r16', 'Octavos de final'), [knockoutPicks, roundOf32]);
-  const quarterfinals = useMemo(() => buildNextRound(roundOf16, knockoutPicks, 'r16', 'qf', 'Cuartos de final'), [knockoutPicks, roundOf16]);
-  const semifinals = useMemo(() => buildNextRound(quarterfinals, knockoutPicks, 'qf', 'sf', 'Semifinales'), [knockoutPicks, quarterfinals]);
-  const final = useMemo(() => buildNextRound(semifinals, knockoutPicks, 'sf', 'final', 'Final'), [knockoutPicks, semifinals]);
+  const roundOf16 = useMemo(() => buildNextRound(roundOf32, knockoutPicks, 'r16', 'Octavos de final'), [knockoutPicks, roundOf32]);
+  const quarterfinals = useMemo(() => buildNextRound(roundOf16, knockoutPicks, 'qf', 'Cuartos de final'), [knockoutPicks, roundOf16]);
+  const semifinals = useMemo(() => buildNextRound(quarterfinals, knockoutPicks, 'sf', 'Semifinales'), [knockoutPicks, quarterfinals]);
+  const final = useMemo(() => buildNextRound(semifinals, knockoutPicks, 'final', 'Final'), [knockoutPicks, semifinals]);
 
   const champion = useMemo(() => {
     const finalMatch = final[0];
