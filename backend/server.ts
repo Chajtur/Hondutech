@@ -1,6 +1,7 @@
 import cors from 'cors';
 import express from 'express';
-import { promises as fs } from 'fs';
+import { existsSync } from 'fs';
+import mysql from 'mysql2/promise';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { worldCup2026Data, type MatchOutcome } from '../src/data/worldCup2026Data';
@@ -24,15 +25,40 @@ type RankingEntry = {
   submittedAt: string;
 };
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const rankingFilePath = path.join(__dirname, 'storage', 'ranking.json');
+type RankingDbRow = {
+  id: string;
+  display_name: string;
+  score: number;
+  max_score: number;
+  accuracy: number;
+  correct_group_matches: number;
+  total_group_matches: number;
+  correct_round_of32: number;
+  total_round_of32: number;
+  submitted_at: string;
+};
 
 const app = express();
-const port = Number(process.env.API_PORT || 8787);
+const port = Number(process.env.PORT || process.env.API_PORT || 8787);
+const tournamentCode = process.env.WC_TOURNAMENT_CODE || 'WC2026';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const distPath = path.resolve(__dirname, '../dist');
+const indexHtmlPath = path.join(distPath, 'index.html');
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+
+const dbPool = mysql.createPool({
+  host: process.env.MYSQL_HOST || process.env.MYSQLHOST,
+  port: Number(process.env.MYSQL_PORT || process.env.MYSQLPORT || 3306),
+  user: process.env.MYSQL_USER || process.env.MYSQLUSER,
+  password: process.env.MYSQL_PASSWORD || process.env.MYSQLPASSWORD,
+  database: process.env.MYSQL_DATABASE || process.env.MYSQLDATABASE,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});
 
 const getScoreFromPayload = (payload: PicksPayload) => {
   let score = 0;
@@ -79,18 +105,50 @@ const getScoreFromPayload = (payload: PicksPayload) => {
   };
 };
 
-const readRanking = async (): Promise<RankingEntry[]> => {
-  try {
-    const content = await fs.readFile(rankingFilePath, 'utf-8');
-    const parsed = JSON.parse(content) as RankingEntry[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+const isValidGroupResult = (value: unknown): value is MatchOutcome => {
+  return value === 'home' || value === 'draw' || value === 'away';
 };
 
-const writeRanking = async (items: RankingEntry[]) => {
-  await fs.writeFile(rankingFilePath, `${JSON.stringify(items, null, 2)}\n`, 'utf-8');
+const isNonEmptyString = (value: unknown): value is string => {
+  return typeof value === 'string' && value.trim().length > 0;
+};
+
+const getRankingFromDb = async (): Promise<RankingEntry[]> => {
+  const [rows] = await dbPool.query<RankingDbRow[]>(
+    `
+      select
+        r.id,
+        r.display_name,
+        r.score,
+        r.max_score,
+        r.accuracy,
+        r.correct_group_matches,
+        r.total_group_matches,
+        r.correct_round_of32,
+        r.total_round_of32,
+        r.submitted_at
+      from v_public_ranking r
+      join prediction_submissions s on s.id = r.id
+      join tournaments t on t.id = s.tournament_id
+      where t.code = ?
+      order by r.score desc, r.accuracy desc, r.submitted_at asc
+      limit 100
+    `,
+    [tournamentCode],
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    displayName: row.display_name,
+    score: Number(row.score),
+    maxScore: Number(row.max_score),
+    accuracy: Number(row.accuracy),
+    correctGroupMatches: Number(row.correct_group_matches),
+    totalGroupMatches: Number(row.total_group_matches),
+    correctRoundOf32: Number(row.correct_round_of32),
+    totalRoundOf32: Number(row.total_round_of32),
+    submittedAt: new Date(row.submitted_at).toISOString(),
+  }));
 };
 
 const normalizeDisplayName = (value: unknown) => {
@@ -99,20 +157,17 @@ const normalizeDisplayName = (value: unknown) => {
 };
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, db: 'configured' });
 });
 
 app.get('/api/ranking', async (_req, res) => {
-  const ranking = await readRanking();
-  const sorted = [...ranking]
-    .sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      if (b.accuracy !== a.accuracy) return b.accuracy - a.accuracy;
-      return new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime();
-    })
-    .slice(0, 100);
-
-  res.json({ ranking: sorted });
+  try {
+    const ranking = await getRankingFromDb();
+    res.json({ ranking });
+  } catch (error) {
+    console.error('Error loading ranking from DB', error);
+    res.status(500).json({ error: 'No se pudo cargar ranking desde la base de datos' });
+  }
 });
 
 app.post('/api/ranking/submit', async (req, res) => {
@@ -132,21 +187,173 @@ app.post('/api/ranking/submit', async (req, res) => {
   };
 
   const scoreData = getScoreFromPayload(payload);
+  const submissionId = crypto.randomUUID();
+  const submittedAt = new Date().toISOString();
+
+  const groupEntries = Object.entries(groupResults).filter(([, result]) => isValidGroupResult(result)) as Array<
+    [string, MatchOutcome]
+  >;
+  const knockoutEntries = Object.entries(knockoutPicks).filter(([, teamCode]) => isNonEmptyString(teamCode)) as Array<
+    [string, string]
+  >;
+
+  const connection = await dbPool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    await connection.query(
+      `
+        insert into predictor_players (id, display_name)
+        select uuid(), ?
+        where not exists (
+          select 1 from predictor_players where display_name = ?
+        )
+      `,
+      [displayName, displayName],
+    );
+
+    const [playerRows] = await connection.query<Array<{ id: string }>>(
+      `
+        select id
+        from predictor_players
+        where display_name = ?
+        order by created_at asc
+        limit 1
+      `,
+      [displayName],
+    );
+
+    if (!playerRows[0]?.id) {
+      throw new Error('No se pudo resolver player_id');
+    }
+
+    const playerId = playerRows[0].id;
+
+    const [submissionResult] = await connection.query<mysql.ResultSetHeader>(
+      `
+        insert into prediction_submissions (
+          id,
+          tournament_id,
+          player_id,
+          score,
+          max_score,
+          accuracy,
+          correct_group_matches,
+          total_group_matches,
+          correct_round_of32,
+          total_round_of32,
+          submitted_at
+        )
+        select
+          ?,
+          t.id,
+          ?,
+          ?,
+          ?,
+          ?,
+          ?,
+          ?,
+          ?,
+          ?,
+          ?
+        from tournaments t
+        where t.code = ?
+      `,
+      [
+        submissionId,
+        playerId,
+        scoreData.score,
+        scoreData.maxScore,
+        scoreData.accuracy,
+        scoreData.correctGroupMatches,
+        scoreData.totalGroupMatches,
+        scoreData.correctRoundOf32,
+        scoreData.totalRoundOf32,
+        submittedAt,
+        tournamentCode,
+      ],
+    );
+
+    if (submissionResult.affectedRows === 0) {
+      throw new Error('No existe el torneo configurado para guardar la prediccion');
+    }
+
+    for (const [matchCode, pickedResult] of groupEntries) {
+      await connection.query(
+        `
+          insert into prediction_group_picks (id, submission_id, match_id, picked_result)
+          select
+            uuid(),
+            ?,
+            m.id,
+            ?
+          from prediction_submissions s
+          join matches m
+            on m.tournament_id = s.tournament_id
+           and m.match_code = ?
+          where s.id = ?
+        `,
+        [submissionId, pickedResult, matchCode, submissionId],
+      );
+    }
+
+    for (const [matchCode, pickedTeamCode] of knockoutEntries) {
+      await connection.query(
+        `
+          insert into prediction_knockout_picks (id, submission_id, match_id, picked_team_id)
+          select
+            uuid(),
+            ?,
+            m.id,
+            tm.id
+          from prediction_submissions s
+          join matches m
+            on m.tournament_id = s.tournament_id
+           and m.match_code = ?
+          join teams tm
+            on tm.team_code = ?
+          where s.id = ?
+        `,
+        [submissionId, matchCode, pickedTeamCode, submissionId],
+      );
+    }
+
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error submitting prediction', error);
+    res.status(500).json({ error: 'No se pudo guardar la prediccion en la base de datos' });
+    return;
+  } finally {
+    connection.release();
+  }
 
   const entry: RankingEntry = {
-    id: crypto.randomUUID(),
+    id: submissionId,
     displayName,
-    submittedAt: new Date().toISOString(),
+    submittedAt,
     ...scoreData,
   };
-
-  const ranking = await readRanking();
-  ranking.push(entry);
-  await writeRanking(ranking);
 
   res.status(201).json({ entry });
 });
 
+if (existsSync(indexHtmlPath)) {
+  app.use(express.static(distPath));
+
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' || req.path.startsWith('/api')) {
+      next();
+      return;
+    }
+
+    res.sendFile(indexHtmlPath);
+  });
+} else {
+  console.warn('Frontend build not found. Run npm run build before starting production server.');
+}
+
 app.listen(port, () => {
-  console.log(`World Cup ranking API listening on port ${port}`);
+  console.log(`Hondu.tech app listening on port ${port}`);
 });

@@ -186,7 +186,7 @@ export const worldCup2026Data: WorldCup2026Data = {
     { id: 'r32-1', label: 'Partido 73', kickoff: 'Dom 28 Jun 2026 · Estadio Los Angeles', homeSlot: '2A', awaySlot: '2B' },
     { id: 'r32-2', label: 'Partido 74', kickoff: 'Lun 29 Jun 2026 · Estadio Boston', homeSlot: '1E', awaySlot: '3[A/B/C/D/F]' },
     { id: 'r32-3', label: 'Partido 75', kickoff: 'Lun 29 Jun 2026 · Estadio Monterrey', homeSlot: '1F', awaySlot: '2C' },
-    { id: 'r32-4', label: 'Partido 76', kickoff: 'Lun 29 Jun 2026 · Estadio Houston', homeSlot: '1E', awaySlot: '2F' },
+    { id: 'r32-4', label: 'Partido 76', kickoff: 'Lun 29 Jun 2026 · Estadio Houston', homeSlot: '1C', awaySlot: '2F' },
     { id: 'r32-5', label: 'Partido 77', kickoff: 'Mar 30 Jun 2026 · Estadio Nueva York Nueva Jersey', homeSlot: '1I', awaySlot: '3[C/D/F/G/H]' },
     { id: 'r32-6', label: 'Partido 78', kickoff: 'Mar 30 Jun 2026 · Estadio Dallas', homeSlot: '2E', awaySlot: '2I' },
     { id: 'r32-7', label: 'Partido 79', kickoff: 'Mar 30 Jun 2026 · Estadio Azteca Ciudad de Mexico', homeSlot: '1A', awaySlot: '3[C/E/F/H/I]' },
@@ -200,4 +200,5 @@ export const worldCup2026Data: WorldCup2026Data = {
     { id: 'r32-15', label: 'Partido 87', kickoff: 'Vie 3 Jul 2026 · Estadio Kansas City', homeSlot: '1K', awaySlot: '3[D/E/I/J/L]' },
     { id: 'r32-16', label: 'Partido 88', kickoff: 'Vie 3 Jul 2026 · Estadio Dallas', homeSlot: '2D', awaySlot: '2G' },
   ],
+  
 };
