@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   worldCup2026Data,
   type GroupMatch,
   type MatchOutcome,
+  type MatchScore,
   type RoundOf32Rule,
   type Team,
 } from '../data/worldCup2026Data';
@@ -28,8 +29,28 @@ type KnockoutMatch = {
   officialWinnerTeamId?: string;
 };
 
-type GroupResultMap = Record<string, MatchOutcome | undefined>;
-type KnockoutPickMap = Record<string, string | undefined>;
+type ScoreDraft = {
+  homeGoals?: number;
+  awayGoals?: number;
+};
+
+type ScorePickMap = Record<string, ScoreDraft | undefined>;
+
+type OfficialMatchStatus = {
+  matchCode: string;
+  homeTeamId?: string;
+  awayTeamId?: string;
+  officialScore?: MatchScore;
+  officialResult?: MatchOutcome;
+  officialWinnerTeamId?: string;
+  isLocked: boolean;
+};
+
+type KnockoutScorePayload = MatchScore & {
+  homeTeamId: string;
+  awayTeamId: string;
+  winnerTeamId: string;
+};
 
 type RankingEntry = {
   id: string;
@@ -41,6 +62,8 @@ type RankingEntry = {
   totalGroupMatches: number;
   correctRoundOf32: number;
   totalRoundOf32: number;
+  correctExactScores: number;
+  totalExactScores: number;
   submittedAt: string;
 };
 
@@ -66,12 +89,6 @@ const FLAG_BY_TEAM_ID: Record<string, string> = {
   eng: '🏴', cro: '🇭🇷', gha: '🇬🇭', pan: '🇵🇦',
 };
 
-const scoreByResult: Record<MatchOutcome, [number, number]> = {
-  home: [2, 1],
-  draw: [1, 1],
-  away: [1, 2],
-};
-
 const matchesByGroup = groupMatches.reduce<Record<string, GroupMatch[]>>((acc, match) => {
   if (!acc[match.group]) {
     acc[match.group] = [];
@@ -88,6 +105,26 @@ const createUnknownTeam = (label: string): Team => ({
 
 const getTeamName = (teamId: string) => teamById.get(teamId)?.name ?? 'Por definir';
 const getTeamFlag = (teamId: string) => FLAG_BY_TEAM_ID[teamId] ?? '🏳️';
+const isRealTeam = (team: Team) => !team.id.startsWith('tbd-');
+
+const getOutcomeFromScore = (score: MatchScore): MatchOutcome => {
+  if (score.homeGoals > score.awayGoals) return 'home';
+  if (score.awayGoals > score.homeGoals) return 'away';
+  return 'draw';
+};
+
+const getCompleteScore = (score?: ScoreDraft): MatchScore | undefined => {
+  if (!score || score.homeGoals === undefined || score.awayGoals === undefined) return undefined;
+  return {
+    homeGoals: score.homeGoals,
+    awayGoals: score.awayGoals,
+  };
+};
+
+const formatScore = (score?: MatchScore) => {
+  if (!score) return '';
+  return `${score.homeGoals}-${score.awayGoals}`;
+};
 
 const sortTable = (table: GroupStats[]) => {
   return [...table].sort((a, b) => {
@@ -138,52 +175,17 @@ const resolveSlotTeam = (
   return createUnknownTeam(slot);
 };
 
-const buildNextRound = (
-  source: KnockoutMatch[],
-  picks: KnockoutPickMap,
-  targetPrefix: string,
-  label: string,
-): KnockoutMatch[] => {
-  const participants = source.map((match, index) => {
-    const locked = match.officialWinnerTeamId;
-    if (locked && (locked === match.home.id || locked === match.away.id)) {
-      return locked === match.home.id ? match.home : match.away;
-    }
-
-    const selected = picks[match.id];
-    const valid = selected === match.home.id || selected === match.away.id;
-    if (valid) {
-      return selected === match.home.id ? match.home : match.away;
-    }
-
-    return createUnknownTeam(`Ganador ${match.label || `${targetPrefix.toUpperCase()} ${index + 1}`}`);
-  });
-
-  const list: KnockoutMatch[] = [];
-  for (let i = 0; i < participants.length; i += 2) {
-    list.push({
-      id: `${targetPrefix}-${Math.floor(i / 2) + 1}`,
-      label,
-      kickoff: '',
-      home: participants[i],
-      away: participants[i + 1],
-    });
-  }
-
-  return list;
-};
-
 const stageOrder = ['r32', 'r16', 'qf', 'sf', 'final'];
 
-const trimKnockoutPicks = (picks: KnockoutPickMap, stage: string): KnockoutPickMap => {
+const trimScorePicks = (picks: ScorePickMap, stage: string): ScorePickMap => {
   const stageIndex = stageOrder.indexOf(stage);
   if (stageIndex < 0) return picks;
 
-  const cleaned: KnockoutPickMap = {};
+  const cleaned: ScorePickMap = {};
   Object.entries(picks).forEach(([key, value]) => {
     const [matchStage] = key.split('-');
     const currentIndex = stageOrder.indexOf(matchStage);
-    if (currentIndex >= 0 && currentIndex <= stageIndex) {
+    if (currentIndex < 0 || currentIndex <= stageIndex) {
       cleaned[key] = value;
     }
   });
@@ -192,14 +194,93 @@ const trimKnockoutPicks = (picks: KnockoutPickMap, stage: string): KnockoutPickM
 };
 
 export default function WorldCupPredictor() {
-  const [groupResults, setGroupResults] = useState<GroupResultMap>({});
-  const [knockoutPicks, setKnockoutPicks] = useState<KnockoutPickMap>({});
+  const [scorePicks, setScorePicks] = useState<ScorePickMap>({});
+  const [officialMatches, setOfficialMatches] = useState<Record<string, OfficialMatchStatus>>({});
   const [copyMsg, setCopyMsg] = useState('');
   const [playerName, setPlayerName] = useState('');
   const [submitMsg, setSubmitMsg] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [ranking, setRanking] = useState<RankingEntry[]>([]);
   const [rankingLoading, setRankingLoading] = useState(true);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [adminToken, setAdminToken] = useState('');
+  const [adminMatchCode, setAdminMatchCode] = useState(groupMatches[0]?.id ?? '');
+  const [adminHomeGoals, setAdminHomeGoals] = useState('');
+  const [adminAwayGoals, setAdminAwayGoals] = useState('');
+  const [adminHomeTeamCode, setAdminHomeTeamCode] = useState('');
+  const [adminAwayTeamCode, setAdminAwayTeamCode] = useState('');
+  const [adminWinnerTeamCode, setAdminWinnerTeamCode] = useState('');
+  const [adminMsg, setAdminMsg] = useState('');
+  const [isSavingAdminResult, setIsSavingAdminResult] = useState(false);
+
+  const getOfficialStatus = useCallback((matchId: string) => officialMatches[matchId], [officialMatches]);
+
+  const getOfficialScore = useCallback((matchId: string, fallback?: MatchScore) => {
+    return getOfficialStatus(matchId)?.officialScore ?? fallback;
+  }, [getOfficialStatus]);
+
+  const getOfficialResult = (matchId: string, fallbackScore?: MatchScore, fallbackResult?: MatchOutcome) => {
+    const status = getOfficialStatus(matchId);
+    if (status?.officialResult) return status.officialResult;
+    if (status?.officialScore) return getOutcomeFromScore(status.officialScore);
+    if (fallbackScore) return getOutcomeFromScore(fallbackScore);
+    return fallbackResult;
+  };
+
+  const getOfficialWinnerTeamId = useCallback((matchId: string, fallback?: string) => {
+    return getOfficialStatus(matchId)?.officialWinnerTeamId ?? fallback;
+  }, [getOfficialStatus]);
+
+  const isMatchLocked = (matchId: string, fallbackScore?: MatchScore, fallbackWinner?: string) => {
+    const status = getOfficialStatus(matchId);
+    return Boolean(status?.isLocked || status?.officialScore || fallbackScore || fallbackWinner);
+  };
+
+  const getPredictedWinner = useCallback((match: KnockoutMatch) => {
+    const score = getCompleteScore(scorePicks[match.id]);
+    if (!score) return undefined;
+    const outcome = getOutcomeFromScore(score);
+    if (outcome === 'home') return match.home.id;
+    if (outcome === 'away') return match.away.id;
+    return undefined;
+  }, [scorePicks]);
+
+  const getWinnerTeamFromMatch = useCallback((match: KnockoutMatch) => {
+    const officialWinnerTeamId = getOfficialWinnerTeamId(match.id, match.officialWinnerTeamId);
+    if (officialWinnerTeamId === match.home.id) return match.home;
+    if (officialWinnerTeamId === match.away.id) return match.away;
+
+    const predictedWinnerTeamId = getPredictedWinner(match);
+    if (predictedWinnerTeamId === match.home.id) return match.home;
+    if (predictedWinnerTeamId === match.away.id) return match.away;
+
+    return undefined;
+  }, [getOfficialWinnerTeamId, getPredictedWinner]);
+
+  const buildNextRound = useCallback((
+    source: KnockoutMatch[],
+    targetPrefix: string,
+    label: string,
+  ): KnockoutMatch[] => {
+    const participants = source.map((match, index) => {
+      return getWinnerTeamFromMatch(match) ?? createUnknownTeam(`Ganador ${match.label || `${targetPrefix.toUpperCase()} ${index + 1}`}`);
+    });
+
+    const list: KnockoutMatch[] = [];
+    for (let i = 0; i < participants.length; i += 2) {
+      const id = `${targetPrefix}-${Math.floor(i / 2) + 1}`;
+      list.push({
+        id,
+        label,
+        kickoff: '',
+        home: participants[i],
+        away: participants[i + 1],
+        officialWinnerTeamId: getOfficialWinnerTeamId(id),
+      });
+    }
+
+    return list;
+  }, [getOfficialWinnerTeamId, getWinnerTeamFromMatch]);
 
   const tablesByGroup = useMemo(() => {
     return groupOrder.reduce<Record<string, GroupStats[]>>((acc, groupCode) => {
@@ -218,22 +299,22 @@ export default function WorldCupPredictor() {
       const statsByTeam = new Map(base.map((item) => [item.teamId, item]));
 
       (matchesByGroup[groupCode] ?? []).forEach((match) => {
-        const result = match.officialResult ?? groupResults[match.id];
-        if (!result) return;
+        const score = getOfficialScore(match.id, match.officialScore) ?? getCompleteScore(scorePicks[match.id]);
+        if (!score) return;
 
         const home = statsByTeam.get(match.homeTeamId);
         const away = statsByTeam.get(match.awayTeamId);
         if (!home || !away) return;
 
-        const [homeGoals, awayGoals] = scoreByResult[result];
+        const result = getOutcomeFromScore(score);
 
         home.played += 1;
         away.played += 1;
 
-        home.goalsFor += homeGoals;
-        home.goalsAgainst += awayGoals;
-        away.goalsFor += awayGoals;
-        away.goalsAgainst += homeGoals;
+        home.goalsFor += score.homeGoals;
+        home.goalsAgainst += score.awayGoals;
+        away.goalsFor += score.awayGoals;
+        away.goalsAgainst += score.homeGoals;
 
         if (result === 'home') {
           home.wins += 1;
@@ -257,7 +338,7 @@ export default function WorldCupPredictor() {
       acc[groupCode] = sortTable(base);
       return acc;
     }, {});
-  }, [groupResults]);
+  }, [getOfficialScore, scorePicks]);
 
   const thirdByGroup = useMemo(() => {
     const map: Record<string, Team> = {};
@@ -285,72 +366,48 @@ export default function WorldCupPredictor() {
         kickoff: rule.kickoff,
         home,
         away,
-        officialWinnerTeamId: rule.officialWinnerTeamId,
+        officialWinnerTeamId: getOfficialWinnerTeamId(rule.id, rule.officialWinnerTeamId),
       };
     });
-  }, [tablesByGroup, thirdByGroup]);
+  }, [getOfficialWinnerTeamId, tablesByGroup, thirdByGroup]);
 
-  const roundOf16 = useMemo(() => buildNextRound(roundOf32, knockoutPicks, 'r16', 'Octavos de final'), [knockoutPicks, roundOf32]);
-  const quarterfinals = useMemo(() => buildNextRound(roundOf16, knockoutPicks, 'qf', 'Cuartos de final'), [knockoutPicks, roundOf16]);
-  const semifinals = useMemo(() => buildNextRound(quarterfinals, knockoutPicks, 'sf', 'Semifinales'), [knockoutPicks, quarterfinals]);
-  const final = useMemo(() => buildNextRound(semifinals, knockoutPicks, 'final', 'Final'), [knockoutPicks, semifinals]);
+  const roundOf16 = useMemo(() => buildNextRound(roundOf32, 'r16', 'Octavos de final'), [buildNextRound, roundOf32]);
+  const quarterfinals = useMemo(() => buildNextRound(roundOf16, 'qf', 'Cuartos de final'), [buildNextRound, roundOf16]);
+  const semifinals = useMemo(() => buildNextRound(quarterfinals, 'sf', 'Semifinales'), [buildNextRound, quarterfinals]);
+  const final = useMemo(() => buildNextRound(semifinals, 'final', 'Final'), [buildNextRound, semifinals]);
+
+  const knockoutMatches = useMemo(
+    () => [...roundOf32, ...roundOf16, ...quarterfinals, ...semifinals, ...final],
+    [final, quarterfinals, roundOf16, roundOf32, semifinals],
+  );
+
+  const allMatchCodes = useMemo(() => {
+    return [...groupMatches.map((match) => match.id), ...knockoutMatches.map((match) => match.id)];
+  }, [knockoutMatches]);
 
   const champion = useMemo(() => {
     const finalMatch = final[0];
     if (!finalMatch) return undefined;
+    return getWinnerTeamFromMatch(finalMatch);
+  }, [final, getWinnerTeamFromMatch]);
 
-    if (finalMatch.officialWinnerTeamId) {
-      return finalMatch.officialWinnerTeamId === finalMatch.home.id ? finalMatch.home : finalMatch.away;
-    }
-
-    const selected = knockoutPicks[finalMatch.id];
-    const valid = selected === finalMatch.home.id || selected === finalMatch.away.id;
-    if (!valid) return undefined;
-
-    return selected === finalMatch.home.id ? finalMatch.home : finalMatch.away;
-  }, [final, knockoutPicks]);
-
-  const handleGroupResult = (match: GroupMatch, result: MatchOutcome) => {
-    if (match.officialResult) return;
-
-    setGroupResults((previous) => {
-      const current = previous[match.id];
-      return {
-        ...previous,
-        [match.id]: current === result ? undefined : result,
-      };
-    });
-    setKnockoutPicks({});
-  };
-
-  const handleKnockoutPick = (match: KnockoutMatch, stage: string, teamId: string) => {
-    if (match.officialWinnerTeamId) return;
-
-    setKnockoutPicks((previous) => {
-      const selected = previous[match.id];
-      const nextSelected = selected === teamId ? undefined : teamId;
-      const base = trimKnockoutPicks(previous, stage);
-      return {
-        ...base,
-        [match.id]: nextSelected,
-      };
-    });
-  };
-
-  const exportCurrentState = async () => {
-    const payload = {
-      groupResults,
-      knockoutPicks,
-      generatedAt: new Date().toISOString(),
-    };
-
+  const fetchMatchStatus = async () => {
     try {
-      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
-      setCopyMsg('Estado copiado. Pegalo en tu JSON/archivo para guardarlo.');
-      setTimeout(() => setCopyMsg(''), 2200);
+      const response = await fetch('/api/matches/status');
+      if (!response.ok) {
+        throw new Error('No se pudo cargar estado de partidos');
+      }
+
+      const data = (await response.json()) as { matches?: OfficialMatchStatus[] };
+      const next = (data.matches ?? []).reduce<Record<string, OfficialMatchStatus>>((acc, match) => {
+        acc[match.matchCode] = match;
+        return acc;
+      }, {});
+      setOfficialMatches(next);
     } catch {
-      setCopyMsg('No se pudo copiar el estado al portapapeles.');
-      setTimeout(() => setCopyMsg(''), 2200);
+      setOfficialMatches({});
+    } finally {
+      setStatusLoading(false);
     }
   };
 
@@ -371,8 +428,81 @@ export default function WorldCupPredictor() {
   };
 
   useEffect(() => {
+    void fetchMatchStatus();
     void fetchRanking();
   }, []);
+
+  const updateScore = (matchId: string, side: keyof MatchScore, rawValue: string, stage?: string) => {
+    const parsed = rawValue === '' ? undefined : Number(rawValue);
+    if (parsed !== undefined && (!Number.isInteger(parsed) || parsed < 0 || parsed > 99)) return;
+
+    setScorePicks((previous) => {
+      const base = stage ? trimScorePicks(previous, stage) : { ...previous };
+      const current = base[matchId] ?? {};
+      const next = {
+        ...current,
+        [side]: parsed,
+      };
+
+      if (next.homeGoals === undefined && next.awayGoals === undefined) {
+        delete base[matchId];
+        return base;
+      }
+
+      return {
+        ...base,
+        [matchId]: next,
+      };
+    });
+  };
+
+  const getPredictionPayload = () => {
+    const groupScores = groupMatches.reduce<Record<string, MatchScore>>((acc, match) => {
+      if (isMatchLocked(match.id, match.officialScore)) return acc;
+      const score = getCompleteScore(scorePicks[match.id]);
+      if (score) {
+        acc[match.id] = score;
+      }
+      return acc;
+    }, {});
+
+    const knockoutScores = knockoutMatches.reduce<Record<string, KnockoutScorePayload>>((acc, match) => {
+      if (isMatchLocked(match.id, undefined, match.officialWinnerTeamId) || !isRealTeam(match.home) || !isRealTeam(match.away)) {
+        return acc;
+      }
+
+      const score = getCompleteScore(scorePicks[match.id]);
+      if (!score) return acc;
+
+      const outcome = getOutcomeFromScore(score);
+      if (outcome === 'draw') return acc;
+
+      acc[match.id] = {
+        ...score,
+        homeTeamId: match.home.id,
+        awayTeamId: match.away.id,
+        winnerTeamId: outcome === 'home' ? match.home.id : match.away.id,
+      };
+      return acc;
+    }, {});
+
+    return {
+      groupScores,
+      knockoutScores,
+      generatedAt: new Date().toISOString(),
+    };
+  };
+
+  const exportCurrentState = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(getPredictionPayload(), null, 2));
+      setCopyMsg('Estado copiado en JSON.');
+      setTimeout(() => setCopyMsg(''), 2200);
+    } catch {
+      setCopyMsg('No se pudo copiar el estado al portapapeles.');
+      setTimeout(() => setCopyMsg(''), 2200);
+    }
+  };
 
   const submitToRanking = async () => {
     const cleanName = playerName.trim();
@@ -385,6 +515,7 @@ export default function WorldCupPredictor() {
     setSubmitMsg('');
 
     try {
+      const payload = getPredictionPayload();
       const response = await fetch('/api/ranking/submit', {
         method: 'POST',
         headers: {
@@ -392,8 +523,8 @@ export default function WorldCupPredictor() {
         },
         body: JSON.stringify({
           displayName: cleanName,
-          groupResults,
-          knockoutPicks,
+          groupScores: payload.groupScores,
+          knockoutScores: payload.knockoutScores,
         }),
       });
 
@@ -410,45 +541,127 @@ export default function WorldCupPredictor() {
     }
   };
 
+  const saveAdminResult = async () => {
+    const homeGoals = Number(adminHomeGoals);
+    const awayGoals = Number(adminAwayGoals);
+
+    if (!adminToken.trim()) {
+      setAdminMsg('Ingresa el token admin.');
+      return;
+    }
+
+    if (!adminMatchCode || !Number.isInteger(homeGoals) || !Number.isInteger(awayGoals) || homeGoals < 0 || awayGoals < 0) {
+      setAdminMsg('Selecciona partido y marcador valido.');
+      return;
+    }
+
+    setIsSavingAdminResult(true);
+    setAdminMsg('');
+
+    try {
+      const response = await fetch(`/api/admin/matches/${encodeURIComponent(adminMatchCode)}/result`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': adminToken.trim(),
+        },
+        body: JSON.stringify({
+          homeGoals,
+          awayGoals,
+          homeTeamCode: adminHomeTeamCode.trim() || undefined,
+          awayTeamCode: adminAwayTeamCode.trim() || undefined,
+          winnerTeamCode: adminWinnerTeamCode.trim() || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? 'No se pudo guardar resultado');
+      }
+
+      setAdminMsg('Resultado guardado y partido cerrado.');
+      setAdminHomeGoals('');
+      setAdminAwayGoals('');
+      setAdminWinnerTeamCode('');
+      await fetchMatchStatus();
+      await fetchRanking();
+    } catch (error) {
+      setAdminMsg(error instanceof Error ? error.message : 'Error al guardar resultado.');
+    } finally {
+      setIsSavingAdminResult(false);
+    }
+  };
+
+  const renderScoreInputs = (matchId: string, options?: { locked?: boolean; stage?: string; officialScore?: MatchScore }) => {
+    const score = options?.officialScore ?? scorePicks[matchId] ?? {};
+    const disabled = Boolean(options?.locked);
+
+    return (
+      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+        <input
+          type="number"
+          min="0"
+          max="99"
+          inputMode="numeric"
+          disabled={disabled}
+          value={score.homeGoals ?? ''}
+          onChange={(event) => updateScore(matchId, 'homeGoals', event.target.value, options?.stage)}
+          className="w-full rounded-lg border border-blue-400/15 bg-slate-950 px-2 py-2 text-center text-sm font-semibold text-slate-100 disabled:cursor-not-allowed disabled:opacity-70"
+        />
+        <span className="text-sm font-semibold text-slate-500">-</span>
+        <input
+          type="number"
+          min="0"
+          max="99"
+          inputMode="numeric"
+          disabled={disabled}
+          value={score.awayGoals ?? ''}
+          onChange={(event) => updateScore(matchId, 'awayGoals', event.target.value, options?.stage)}
+          className="w-full rounded-lg border border-blue-400/15 bg-slate-950 px-2 py-2 text-center text-sm font-semibold text-slate-100 disabled:cursor-not-allowed disabled:opacity-70"
+        />
+      </div>
+    );
+  };
+
   const renderKnockoutStage = (stageMatches: KnockoutMatch[], stage: string) => (
     <div className="space-y-3">
       {stageMatches.map((match) => {
-        const selected = match.officialWinnerTeamId ?? knockoutPicks[match.id];
-        const homeActive = selected === match.home.id;
-        const awayActive = selected === match.away.id;
+        const officialScore = getOfficialScore(match.id);
+        const selected = getOfficialWinnerTeamId(match.id, match.officialWinnerTeamId) ?? getPredictedWinner(match);
+        const locked = isMatchLocked(match.id, officialScore, match.officialWinnerTeamId);
+        const score = getCompleteScore(scorePicks[match.id]);
+        const tiedPick = score && getOutcomeFromScore(score) === 'draw';
 
         return (
           <div key={match.id} className="rounded-2xl border border-blue-500/10 bg-black p-4">
-            <p className="mb-2 text-xs uppercase tracking-[0.22em] text-slate-400">{match.label}</p>
-            {match.kickoff ? <p className="mb-3 text-xs text-slate-500">{match.kickoff}</p> : null}
-            <div className="grid gap-2 md:grid-cols-2">
-              <button
-                type="button"
-                disabled={Boolean(match.officialWinnerTeamId)}
-                onClick={() => handleKnockoutPick(match, stage, match.home.id)}
-                className={`rounded-xl border px-3 py-2 text-left text-sm transition ${
-                  homeActive
-                    ? 'border-cyan-300 bg-cyan-400/20 text-cyan-100'
-                    : 'border-blue-400/10 bg-slate-950 text-slate-200 hover:bg-slate-900'
-                } ${match.officialWinnerTeamId ? 'cursor-not-allowed opacity-80' : ''}`}
-              >
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.22em] text-slate-400">{match.label}</p>
+                {match.kickoff ? <p className="mt-1 text-xs text-slate-500">{match.kickoff}</p> : null}
+              </div>
+              {locked ? (
+                <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[11px] font-semibold text-emerald-200">
+                  Cerrado
+                </span>
+              ) : null}
+            </div>
+
+            <div className="grid grid-cols-[1fr_96px_1fr] items-center gap-2">
+              <div className={`rounded-xl border px-3 py-2 text-sm ${selected === match.home.id ? 'border-cyan-300 bg-cyan-400/20 text-cyan-100' : 'border-blue-400/10 bg-slate-950 text-slate-200'}`}>
                 <span className="mr-2" aria-hidden="true">{getTeamFlag(match.home.id)}</span>
                 {match.home.name}
-              </button>
-              <button
-                type="button"
-                disabled={Boolean(match.officialWinnerTeamId)}
-                onClick={() => handleKnockoutPick(match, stage, match.away.id)}
-                className={`rounded-xl border px-3 py-2 text-left text-sm transition ${
-                  awayActive
-                    ? 'border-cyan-300 bg-cyan-400/20 text-cyan-100'
-                    : 'border-blue-400/10 bg-slate-950 text-slate-200 hover:bg-slate-900'
-                } ${match.officialWinnerTeamId ? 'cursor-not-allowed opacity-80' : ''}`}
-              >
+              </div>
+              {renderScoreInputs(match.id, { locked, stage, officialScore })}
+              <div className={`rounded-xl border px-3 py-2 text-sm ${selected === match.away.id ? 'border-cyan-300 bg-cyan-400/20 text-cyan-100' : 'border-blue-400/10 bg-slate-950 text-slate-200'}`}>
                 <span className="mr-2" aria-hidden="true">{getTeamFlag(match.away.id)}</span>
                 {match.away.name}
-              </button>
+              </div>
             </div>
+
+            {tiedPick && !locked ? (
+              <p className="mt-2 text-xs text-amber-200">En eliminatorias el marcador debe definir un ganador.</p>
+            ) : null}
+            {officialScore ? <p className="mt-2 text-xs text-emerald-200">Marcador oficial: {formatScore(officialScore)}</p> : null}
           </div>
         );
       })}
@@ -460,14 +673,19 @@ export default function WorldCupPredictor() {
       <div className="mx-auto max-w-7xl px-6 py-16 lg:px-8">
         <div className="mb-10 max-w-4xl">
           <p className="text-sm font-semibold uppercase tracking-[0.25em] text-cyan-300">Beneficio Mundial</p>
-          <h2 className="mt-3 text-3xl font-bold sm:text-4xl">World Cup Predictor editable por archivo</h2>
+          <h2 className="mt-3 text-3xl font-bold sm:text-4xl">World Cup Predictor por marcador</h2>
           <p className="mt-4 text-slate-300">
-            Los cruces reales de ronda de 32 se leen desde archivo, y puedes fijar resultados oficiales en el mismo JSON/TS.
+            Pronostica marcadores, arma la tabla y compite por puntos: 3 por acertar resultado y 3 extra por marcador exacto.
           </p>
         </div>
 
-        <div className="mb-6 rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-4 text-sm text-cyan-100">
-          Archivo editable: src/data/worldCup2026Data.ts
+        <div className="mb-6 grid gap-3 md:grid-cols-2">
+          <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-4 text-sm text-cyan-100">
+            Los partidos con marcador oficial quedan cerrados automaticamente para nuevas predicciones.
+          </div>
+          <div className="rounded-2xl border border-blue-400/10 bg-slate-950 p-4 text-sm text-slate-300">
+            {statusLoading ? 'Cargando estado oficial...' : `${Object.values(officialMatches).filter((match) => match.isLocked).length} partidos cerrados`}
+          </div>
         </div>
 
         <div className="mb-10 rounded-3xl border border-blue-400/10 bg-slate-950 p-6">
@@ -477,7 +695,7 @@ export default function WorldCupPredictor() {
               onClick={exportCurrentState}
               className="rounded-xl border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20"
             >
-              Copiar estado actual en JSON
+              Copiar prediccion en JSON
             </button>
             {copyMsg ? <p className="text-xs text-cyan-200">{copyMsg}</p> : null}
           </div>
@@ -526,6 +744,76 @@ export default function WorldCupPredictor() {
           </div>
         </div>
 
+        <section className="mb-10 rounded-3xl border border-amber-400/20 bg-amber-400/5 p-6">
+          <h3 className="mb-4 text-xl font-semibold text-amber-100">Admin: subir marcador oficial</h3>
+          <div className="grid gap-3 lg:grid-cols-[1fr_1fr_90px_90px_1fr_1fr_1fr_auto]">
+            <input
+              type="password"
+              value={adminToken}
+              onChange={(event) => setAdminToken(event.target.value)}
+              placeholder="ADMIN_TOKEN"
+              className="rounded-xl border border-amber-300/20 bg-black px-3 py-2 text-sm text-slate-100"
+            />
+            <select
+              value={adminMatchCode}
+              onChange={(event) => setAdminMatchCode(event.target.value)}
+              className="rounded-xl border border-amber-300/20 bg-black px-3 py-2 text-sm text-slate-100"
+            >
+              {allMatchCodes.map((matchCode) => (
+                <option key={matchCode} value={matchCode}>{matchCode}</option>
+              ))}
+            </select>
+            <input
+              type="number"
+              min="0"
+              max="99"
+              value={adminHomeGoals}
+              onChange={(event) => setAdminHomeGoals(event.target.value)}
+              placeholder="Local"
+              className="rounded-xl border border-amber-300/20 bg-black px-3 py-2 text-sm text-slate-100"
+            />
+            <input
+              type="number"
+              min="0"
+              max="99"
+              value={adminAwayGoals}
+              onChange={(event) => setAdminAwayGoals(event.target.value)}
+              placeholder="Visita"
+              className="rounded-xl border border-amber-300/20 bg-black px-3 py-2 text-sm text-slate-100"
+            />
+            <input
+              type="text"
+              value={adminHomeTeamCode}
+              onChange={(event) => setAdminHomeTeamCode(event.target.value)}
+              placeholder="homeTeamCode opcional"
+              className="rounded-xl border border-amber-300/20 bg-black px-3 py-2 text-sm text-slate-100"
+            />
+            <input
+              type="text"
+              value={adminAwayTeamCode}
+              onChange={(event) => setAdminAwayTeamCode(event.target.value)}
+              placeholder="awayTeamCode opcional"
+              className="rounded-xl border border-amber-300/20 bg-black px-3 py-2 text-sm text-slate-100"
+            />
+            <input
+              type="text"
+              value={adminWinnerTeamCode}
+              onChange={(event) => setAdminWinnerTeamCode(event.target.value)}
+              placeholder="winner si empate"
+              className="rounded-xl border border-amber-300/20 bg-black px-3 py-2 text-sm text-slate-100"
+            />
+            <button
+              type="button"
+              onClick={saveAdminResult}
+              disabled={isSavingAdminResult}
+              className="rounded-xl bg-amber-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-70"
+            >
+              {isSavingAdminResult ? 'Guardando...' : 'Guardar'}
+            </button>
+          </div>
+          {adminMsg ? <p className="mt-3 text-xs text-amber-100">{adminMsg}</p> : null}
+        </section>
+
         <section className="mb-10 rounded-3xl border border-blue-500/10 bg-slate-950 p-6">
           <div className="mb-4 flex items-center justify-between gap-3">
             <h3 className="text-2xl font-semibold">Ranking publico de aciertos</h3>
@@ -550,6 +838,7 @@ export default function WorldCupPredictor() {
                     <th className="px-3 py-3">Pos</th>
                     <th className="px-3 py-3">Jugador</th>
                     <th className="px-3 py-3">Puntaje</th>
+                    <th className="px-3 py-3">Marcadores</th>
                     <th className="px-3 py-3">Precision</th>
                     <th className="px-3 py-3">Fecha</th>
                   </tr>
@@ -560,6 +849,7 @@ export default function WorldCupPredictor() {
                       <td className="px-3 py-3 font-semibold text-cyan-300">#{index + 1}</td>
                       <td className="px-3 py-3">{entry.displayName}</td>
                       <td className="px-3 py-3">{entry.score}/{entry.maxScore}</td>
+                      <td className="px-3 py-3">{entry.correctExactScores}/{entry.totalExactScores}</td>
                       <td className="px-3 py-3">{entry.accuracy}%</td>
                       <td className="px-3 py-3">{new Date(entry.submittedAt).toLocaleString()}</td>
                     </tr>
@@ -618,57 +908,35 @@ export default function WorldCupPredictor() {
 
                 <div className="space-y-3">
                   {fixtures.map((match) => {
-                    const effective = match.officialResult ?? groupResults[match.id];
+                    const officialScore = getOfficialScore(match.id, match.officialScore);
+                    const officialResult = getOfficialResult(match.id, match.officialScore, match.officialResult);
                     const homeName = getTeamName(match.homeTeamId);
                     const awayName = getTeamName(match.awayTeamId);
-                    const locked = Boolean(match.officialResult);
+                    const locked = isMatchLocked(match.id, match.officialScore);
 
                     return (
                       <div key={match.id} className="rounded-2xl border border-blue-400/10 bg-black p-3">
-                        <p className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-400">{match.kickoff}</p>
-                        <p className="mb-3 text-sm text-slate-200">
-                          {homeName} vs {awayName}
-                        </p>
-                        <div className="grid grid-cols-3 gap-2 text-xs">
-                          <button
-                            type="button"
-                            disabled={locked}
-                            onClick={() => handleGroupResult(match, 'home')}
-                            className={`rounded-lg border px-2 py-2 transition ${
-                              effective === 'home'
-                                ? 'border-cyan-300 bg-cyan-400/20 text-cyan-100'
-                                : 'border-blue-400/10 bg-slate-950 text-slate-300 hover:bg-slate-900'
-                            } ${locked ? 'cursor-not-allowed opacity-80' : ''}`}
-                          >
+                        <div className="mb-2 flex items-start justify-between gap-3">
+                          <p className="text-xs uppercase tracking-[0.18em] text-slate-400">{match.kickoff}</p>
+                          {locked ? (
+                            <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[11px] font-semibold text-emerald-200">
+                              Cerrado
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="grid grid-cols-[1fr_88px_1fr] items-center gap-2 text-xs">
+                          <div className={`rounded-lg border px-2 py-2 ${officialResult === 'home' ? 'border-cyan-300 bg-cyan-400/20 text-cyan-100' : 'border-blue-400/10 bg-slate-950 text-slate-300'}`}>
                             <span className="mr-1" aria-hidden="true">{getTeamFlag(match.homeTeamId)}</span>
                             {homeName}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={locked}
-                            onClick={() => handleGroupResult(match, 'draw')}
-                            className={`rounded-lg border px-2 py-2 transition ${
-                              effective === 'draw'
-                                ? 'border-cyan-300 bg-cyan-400/20 text-cyan-100'
-                                : 'border-blue-400/10 bg-slate-950 text-slate-300 hover:bg-slate-900'
-                            } ${locked ? 'cursor-not-allowed opacity-80' : ''}`}
-                          >
-                            Empate
-                          </button>
-                          <button
-                            type="button"
-                            disabled={locked}
-                            onClick={() => handleGroupResult(match, 'away')}
-                            className={`rounded-lg border px-2 py-2 transition ${
-                              effective === 'away'
-                                ? 'border-cyan-300 bg-cyan-400/20 text-cyan-100'
-                                : 'border-blue-400/10 bg-slate-950 text-slate-300 hover:bg-slate-900'
-                            } ${locked ? 'cursor-not-allowed opacity-80' : ''}`}
-                          >
+                          </div>
+                          {renderScoreInputs(match.id, { locked, officialScore })}
+                          <div className={`rounded-lg border px-2 py-2 ${officialResult === 'away' ? 'border-cyan-300 bg-cyan-400/20 text-cyan-100' : 'border-blue-400/10 bg-slate-950 text-slate-300'}`}>
                             <span className="mr-1" aria-hidden="true">{getTeamFlag(match.awayTeamId)}</span>
                             {awayName}
-                          </button>
+                          </div>
                         </div>
+                        {officialResult === 'draw' ? <p className="mt-2 text-xs text-cyan-200">Empate oficial/proyectado</p> : null}
+                        {officialScore ? <p className="mt-2 text-xs text-emerald-200">Marcador oficial: {formatScore(officialScore)}</p> : null}
                       </div>
                     );
                   })}
@@ -680,7 +948,7 @@ export default function WorldCupPredictor() {
 
         <div className="mt-12 grid gap-6 lg:grid-cols-2 xl:grid-cols-5">
           <div className="rounded-3xl border border-blue-500/10 bg-slate-950 p-5 xl:col-span-2">
-            <h3 className="mb-4 text-xl font-semibold">Ronda de 32 (cruces oficiales)</h3>
+            <h3 className="mb-4 text-xl font-semibold">Ronda de 32</h3>
             {renderKnockoutStage(roundOf32, 'r32')}
           </div>
 

@@ -1,5 +1,10 @@
 export type MatchOutcome = 'home' | 'draw' | 'away';
 
+export type MatchScore = {
+  homeGoals: number;
+  awayGoals: number;
+};
+
 export type Team = {
   id: string;
   name: string;
@@ -12,6 +17,7 @@ export type GroupMatch = {
   homeTeamId: string;
   awayTeamId: string;
   kickoff: string;
+  officialScore?: MatchScore;
   officialResult?: MatchOutcome;
 };
 
@@ -21,6 +27,7 @@ export type RoundOf32Rule = {
   kickoff: string;
   homeSlot: string;
   awaySlot: string;
+  officialScore?: MatchScore;
   officialWinnerTeamId?: string;
 };
 
@@ -31,6 +38,7 @@ export type WorldCup2026Data = {
 };
 
 // Edit this file to lock official data as matches are played.
+// - officialScore: { homeGoals: 2, awayGoals: 1 }
 // - officialResult: 'home' | 'draw' | 'away'
 // - officialWinnerTeamId: team id string (example: 'mex')
 export const worldCup2026Data: WorldCup2026Data = {
