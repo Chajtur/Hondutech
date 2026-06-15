@@ -197,8 +197,11 @@ export default function WorldCupPredictor() {
   const [scorePicks, setScorePicks] = useState<ScorePickMap>({});
   const [officialMatches, setOfficialMatches] = useState<Record<string, OfficialMatchStatus>>({});
   const [copyMsg, setCopyMsg] = useState('');
+  const [importText, setImportText] = useState('');
+  const [importMsg, setImportMsg] = useState('');
   const [playerName, setPlayerName] = useState('');
   const [submitMsg, setSubmitMsg] = useState('');
+  const [submissionId, setSubmissionId] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [ranking, setRanking] = useState<RankingEntry[]>([]);
   const [rankingLoading, setRankingLoading] = useState(true);
@@ -493,6 +496,44 @@ export default function WorldCupPredictor() {
     };
   };
 
+  const importPredictionJson = () => {
+    try {
+      const parsed = JSON.parse(importText) as {
+        groupScores?: Record<string, unknown>;
+        knockoutScores?: Record<string, unknown>;
+      };
+
+      const nextScores: ScorePickMap = {};
+
+      Object.entries(parsed.groupScores ?? {}).forEach(([matchId, value]) => {
+        const score = getCompleteScore(value as ScoreDraft);
+        if (score) {
+          nextScores[matchId] = score;
+        }
+      });
+
+      Object.entries(parsed.knockoutScores ?? {}).forEach(([matchId, value]) => {
+        const score = getCompleteScore(value as ScoreDraft);
+        if (score) {
+          nextScores[matchId] = score;
+        }
+      });
+
+      setScorePicks(nextScores);
+      setImportMsg(`Prediccion cargada: ${Object.keys(nextScores).length} marcadores.`);
+      setTimeout(() => setImportMsg(''), 2600);
+    } catch {
+      setImportMsg('JSON invalido. Revisa que pegaste el objeto completo.');
+    }
+  };
+
+  const clearPrediction = () => {
+    setScorePicks({});
+    setImportText('');
+    setImportMsg('Prediccion limpiada.');
+    setTimeout(() => setImportMsg(''), 1800);
+  };
+
   const exportCurrentState = async () => {
     try {
       await navigator.clipboard.writeText(JSON.stringify(getPredictionPayload(), null, 2));
@@ -513,6 +554,7 @@ export default function WorldCupPredictor() {
 
     setIsSubmitting(true);
     setSubmitMsg('');
+    setSubmissionId('');
 
     try {
       const payload = getPredictionPayload();
@@ -532,12 +574,30 @@ export default function WorldCupPredictor() {
         throw new Error('No se pudo enviar la prediccion');
       }
 
-      setSubmitMsg('Prediccion publicada en el ranking.');
+      const data = (await response.json()) as { entry?: RankingEntry };
+      const nextSubmissionId = data.entry?.id ?? '';
+      setSubmissionId(nextSubmissionId);
+      setSubmitMsg(
+        nextSubmissionId
+          ? 'Prediccion publicada. Guarda este ID para comprobar tu participacion.'
+          : 'Prediccion publicada en el ranking.',
+      );
       await fetchRanking();
     } catch {
       setSubmitMsg('Error al publicar. Verifica que el backend este corriendo.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const copySubmissionId = async () => {
+    if (!submissionId) return;
+
+    try {
+      await navigator.clipboard.writeText(submissionId);
+      setSubmitMsg('ID copiado. Guardalo como comprobante de tu prediccion.');
+    } catch {
+      setSubmitMsg('No se pudo copiar el ID. Copialo manualmente.');
     }
   };
 
@@ -701,6 +761,36 @@ export default function WorldCupPredictor() {
             {copyMsg ? <p className="text-xs text-cyan-200">{copyMsg}</p> : null}
           </div>
 
+          <div className="mb-4 rounded-2xl border border-blue-500/10 bg-black p-4">
+            <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Cargar prediccion desde JSON
+            </label>
+            <textarea
+              value={importText}
+              onChange={(event) => setImportText(event.target.value)}
+              placeholder='Pega aqui el JSON con "groupScores" y "knockoutScores"'
+              rows={4}
+              className="w-full rounded-xl border border-blue-400/15 bg-slate-950 px-3 py-2 text-xs text-slate-100"
+            />
+            <div className="mt-3 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={importPredictionJson}
+                className="rounded-xl border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20"
+              >
+                Cargar JSON
+              </button>
+              <button
+                type="button"
+                onClick={clearPrediction}
+                className="rounded-xl border border-slate-600 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-800"
+              >
+                Limpiar prediccion
+              </button>
+              {importMsg ? <p className="text-xs text-cyan-200">{importMsg}</p> : null}
+            </div>
+          </div>
+
           <div className="mb-4 grid gap-3 rounded-2xl border border-blue-500/10 bg-black p-4 md:grid-cols-[1fr_auto]">
             <div>
               <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
@@ -726,6 +816,23 @@ export default function WorldCupPredictor() {
           </div>
 
           {submitMsg ? <p className="mb-4 text-xs text-cyan-200">{submitMsg}</p> : null}
+          {submissionId ? (
+            <div className="mb-4 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200">ID de comprobante</p>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <code className="rounded-lg border border-emerald-300/20 bg-black px-3 py-2 text-xs text-emerald-100">
+                  {submissionId}
+                </code>
+                <button
+                  type="button"
+                  onClick={copySubmissionId}
+                  className="rounded-xl border border-emerald-300/30 bg-emerald-300/10 px-3 py-2 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/20"
+                >
+                  Copiar ID
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           <div className="grid gap-4 sm:grid-cols-3">
             <div className="rounded-2xl border border-blue-400/10 bg-black p-4">

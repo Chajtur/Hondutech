@@ -1,7 +1,7 @@
 import cors from 'cors';
 import express from 'express';
-import { existsSync } from 'fs';
-import mysql from 'mysql2/promise';
+import { existsSync, readFileSync } from 'fs';
+import mysql, { type RowDataPacket } from 'mysql2/promise';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import type { MatchOutcome, MatchScore } from '../src/data/worldCup2026Data';
@@ -14,8 +14,8 @@ type KnockoutScorePick = MatchScore & {
 
 type PicksPayload = {
   displayName: string;
-  groupScores: Record<string, MatchScore | undefined>;
-  knockoutScores: Record<string, KnockoutScorePick | undefined>;
+  groupScores: Record<string, MatchScore>;
+  knockoutScores: Record<string, KnockoutScorePick>;
 };
 
 type ScoreData = {
@@ -36,13 +36,13 @@ type RankingEntry = ScoreData & {
   submittedAt: string;
 };
 
-type SubmissionDbRow = {
+type SubmissionDbRow = RowDataPacket & {
   id: string;
   display_name: string;
   submitted_at: string;
 };
 
-type GroupPickDbRow = {
+type GroupPickDbRow = RowDataPacket & {
   submission_id: string;
   official_result: MatchOutcome | null;
   official_home_goals: number | null;
@@ -52,7 +52,7 @@ type GroupPickDbRow = {
   picked_away_goals: number | null;
 };
 
-type KnockoutPickDbRow = {
+type KnockoutPickDbRow = RowDataPacket & {
   submission_id: string;
   stage: string;
   official_winner_team_code: string | null;
@@ -67,7 +67,7 @@ type KnockoutPickDbRow = {
   picked_away_goals: number | null;
 };
 
-type MatchStatusDbRow = {
+type MatchStatusDbRow = RowDataPacket & {
   match_code: string;
   home_team_code: string | null;
   away_team_code: string | null;
@@ -78,7 +78,7 @@ type MatchStatusDbRow = {
   is_locked: number;
 };
 
-type MatchAdminDbRow = {
+type MatchAdminDbRow = RowDataPacket & {
   id: string;
   stage: string;
   home_team_id: string | null;
@@ -87,7 +87,35 @@ type MatchAdminDbRow = {
   away_team_code: string | null;
 };
 
+type IdDbRow = RowDataPacket & {
+  id: string;
+};
+
 const app = express();
+const loadLocalEnv = () => {
+  const envPath = path.resolve(process.cwd(), '.env');
+  if (!existsSync(envPath)) return;
+
+  const envContent = readFileSync(envPath, 'utf8');
+  envContent.split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+
+    const separatorIndex = trimmed.indexOf('=');
+    if (separatorIndex < 0) return;
+
+    const key = trimmed.slice(0, separatorIndex).trim();
+    const rawValue = trimmed.slice(separatorIndex + 1).trim();
+    const value = rawValue.replace(/^['"]|['"]$/g, '');
+
+    if (key) {
+      process.env[key] = value;
+    }
+  });
+};
+
+loadLocalEnv();
+
 const port = Number(process.env.PORT || process.env.API_PORT || 8787);
 const tournamentCode = process.env.WC_TOURNAMENT_CODE || 'WC2026';
 const __filename = fileURLToPath(import.meta.url);
@@ -365,7 +393,7 @@ const getRankingFromDb = async (): Promise<RankingEntry[]> => {
 };
 
 const getTeamIdByCode = async (connection: mysql.PoolConnection, teamCode: string) => {
-  const [rows] = await connection.query<Array<{ id: string }>>(
+  const [rows] = await connection.query<IdDbRow[]>(
     `
       select id
       from teams
@@ -378,8 +406,14 @@ const getTeamIdByCode = async (connection: mysql.PoolConnection, teamCode: strin
   return rows[0]?.id;
 };
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, db: 'configured' });
+app.get('/api/health', async (_req, res) => {
+  try {
+    await dbPool.query('select 1');
+    res.json({ ok: true, db: 'connected' });
+  } catch (error) {
+    console.error('Health check DB error', error);
+    res.status(500).json({ ok: false, db: 'error', error: 'No se pudo conectar a la base de datos' });
+  }
 });
 
 app.get('/api/matches/status', async (_req, res) => {
@@ -456,9 +490,10 @@ app.post('/api/ranking/submit', async (req, res) => {
   const submittedAt = new Date().toISOString();
   const groupEntries = Object.entries(payload.groupScores);
   const knockoutEntries = Object.entries(payload.knockoutScores);
-  const connection = await dbPool.getConnection();
+  let connection: mysql.PoolConnection | undefined;
 
   try {
+    connection = await dbPool.getConnection();
     await connection.beginTransaction();
 
     await connection.query(
@@ -472,7 +507,7 @@ app.post('/api/ranking/submit', async (req, res) => {
       [displayName, displayName],
     );
 
-    const [playerRows] = await connection.query<Array<{ id: string }>>(
+    const [playerRows] = await connection.query<IdDbRow[]>(
       `
         select id
         from predictor_players
@@ -620,12 +655,19 @@ app.post('/api/ranking/submit', async (req, res) => {
 
     await connection.commit();
   } catch (error) {
-    await connection.rollback();
+    if (connection) {
+      await connection.rollback();
+    }
     console.error('Error submitting prediction', error);
+    if (isMissingScoreMigrationError(error)) {
+      res.status(500).json({ error: 'Falta ejecutar backend/sql/04_score_prediction_upgrade.sql en la base de datos' });
+      return;
+    }
+
     res.status(500).json({ error: 'No se pudo guardar la prediccion en la base de datos' });
     return;
   } finally {
-    connection.release();
+    connection?.release();
   }
 
   const entry: RankingEntry = {
@@ -662,9 +704,10 @@ app.post('/api/admin/matches/:matchCode/result', async (req, res) => {
   const homeTeamCode = isNonEmptyString(req.body?.homeTeamCode) ? req.body.homeTeamCode.trim() : undefined;
   const awayTeamCode = isNonEmptyString(req.body?.awayTeamCode) ? req.body.awayTeamCode.trim() : undefined;
   const winnerTeamCode = isNonEmptyString(req.body?.winnerTeamCode) ? req.body.winnerTeamCode.trim() : undefined;
-  const connection = await dbPool.getConnection();
+  let connection: mysql.PoolConnection | undefined;
 
   try {
+    connection = await dbPool.getConnection();
     await connection.beginTransaction();
 
     const [matchRows] = await connection.query<MatchAdminDbRow[]>(
@@ -768,7 +811,9 @@ app.post('/api/admin/matches/:matchCode/result', async (req, res) => {
       isLocked: true,
     });
   } catch (error) {
-    await connection.rollback();
+    if (connection) {
+      await connection.rollback();
+    }
     console.error('Error updating official result', error);
     if (isMissingScoreMigrationError(error)) {
       res.status(500).json({ error: 'Falta ejecutar backend/sql/04_score_prediction_upgrade.sql en la base de datos' });
@@ -777,7 +822,7 @@ app.post('/api/admin/matches/:matchCode/result', async (req, res) => {
 
     res.status(500).json({ error: 'No se pudo actualizar el resultado oficial' });
   } finally {
-    connection.release();
+    connection?.release();
   }
 });
 
