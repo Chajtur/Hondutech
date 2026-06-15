@@ -544,6 +544,7 @@ export default function WorldCupPredictor() {
   const saveAdminResult = async () => {
     const homeGoals = Number(adminHomeGoals);
     const awayGoals = Number(adminAwayGoals);
+    const selectedAdminIsGroupMatch = groupMatches.some((match) => match.id === adminMatchCode);
 
     if (!adminToken.trim()) {
       setAdminMsg('Ingresa el token admin.');
@@ -568,9 +569,9 @@ export default function WorldCupPredictor() {
         body: JSON.stringify({
           homeGoals,
           awayGoals,
-          homeTeamCode: adminHomeTeamCode.trim() || undefined,
-          awayTeamCode: adminAwayTeamCode.trim() || undefined,
-          winnerTeamCode: adminWinnerTeamCode.trim() || undefined,
+          homeTeamCode: selectedAdminIsGroupMatch ? undefined : adminHomeTeamCode.trim() || undefined,
+          awayTeamCode: selectedAdminIsGroupMatch ? undefined : adminAwayTeamCode.trim() || undefined,
+          winnerTeamCode: selectedAdminIsGroupMatch ? undefined : adminWinnerTeamCode.trim() || undefined,
         }),
       });
 
@@ -785,20 +786,23 @@ export default function WorldCupPredictor() {
               type="text"
               value={adminHomeTeamCode}
               onChange={(event) => setAdminHomeTeamCode(event.target.value)}
-              placeholder="homeTeamCode opcional"
+              disabled={groupMatches.some((match) => match.id === adminMatchCode)}
+              placeholder="homeTeamCode eliminatoria"
               className="rounded-xl border border-amber-300/20 bg-black px-3 py-2 text-sm text-slate-100"
             />
             <input
               type="text"
               value={adminAwayTeamCode}
               onChange={(event) => setAdminAwayTeamCode(event.target.value)}
-              placeholder="awayTeamCode opcional"
+              disabled={groupMatches.some((match) => match.id === adminMatchCode)}
+              placeholder="awayTeamCode eliminatoria"
               className="rounded-xl border border-amber-300/20 bg-black px-3 py-2 text-sm text-slate-100"
             />
             <input
               type="text"
               value={adminWinnerTeamCode}
               onChange={(event) => setAdminWinnerTeamCode(event.target.value)}
+              disabled={groupMatches.some((match) => match.id === adminMatchCode)}
               placeholder="winner si empate"
               className="rounded-xl border border-amber-300/20 bg-black px-3 py-2 text-sm text-slate-100"
             />

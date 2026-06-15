@@ -154,6 +154,21 @@ const normalizeDisplayName = (value: unknown) => {
   return value.trim().slice(0, 30);
 };
 
+const isMissingScoreMigrationError = (error: unknown) => {
+  if (!error || typeof error !== 'object') return false;
+
+  const candidate = error as { code?: string; message?: string };
+  return (
+    candidate.code === 'ER_BAD_FIELD_ERROR' &&
+    Boolean(
+      candidate.message?.includes('official_home_goals') ||
+        candidate.message?.includes('official_away_goals') ||
+        candidate.message?.includes('picked_home_goals') ||
+        candidate.message?.includes('correct_exact_scores'),
+    )
+  );
+};
+
 const normalizeGroupScores = (value: unknown): Record<string, MatchScore> => {
   if (!value || typeof value !== 'object') return {};
 
@@ -755,6 +770,11 @@ app.post('/api/admin/matches/:matchCode/result', async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('Error updating official result', error);
+    if (isMissingScoreMigrationError(error)) {
+      res.status(500).json({ error: 'Falta ejecutar backend/sql/04_score_prediction_upgrade.sql en la base de datos' });
+      return;
+    }
+
     res.status(500).json({ error: 'No se pudo actualizar el resultado oficial' });
   } finally {
     connection.release();
