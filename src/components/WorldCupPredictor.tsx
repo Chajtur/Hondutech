@@ -67,6 +67,13 @@ type RankingEntry = {
   submittedAt: string;
 };
 
+type SavedPrediction = {
+  id: string;
+  displayName: string;
+  groupScores: Record<string, MatchScore>;
+  knockoutScores: Record<string, KnockoutScorePayload>;
+};
+
 const groups = worldCup2026Data.groups;
 const groupMatches = worldCup2026Data.groupMatches;
 const roundOf32Rules = worldCup2026Data.roundOf32Rules;
@@ -202,6 +209,9 @@ export default function WorldCupPredictor() {
   const [playerName, setPlayerName] = useState('');
   const [submitMsg, setSubmitMsg] = useState('');
   const [submissionId, setSubmissionId] = useState('');
+  const [loadSubmissionId, setLoadSubmissionId] = useState('');
+  const [loadMsg, setLoadMsg] = useState('');
+  const [isLoadingSubmission, setIsLoadingSubmission] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [ranking, setRanking] = useState<RankingEntry[]>([]);
   const [rankingLoading, setRankingLoading] = useState(true);
@@ -496,6 +506,29 @@ export default function WorldCupPredictor() {
     };
   };
 
+  const buildScorePickMap = (
+    groupScores?: Record<string, unknown>,
+    knockoutScores?: Record<string, unknown>,
+  ) => {
+    const nextScores: ScorePickMap = {};
+
+    Object.entries(groupScores ?? {}).forEach(([matchId, value]) => {
+      const score = getCompleteScore(value as ScoreDraft);
+      if (score) {
+        nextScores[matchId] = score;
+      }
+    });
+
+    Object.entries(knockoutScores ?? {}).forEach(([matchId, value]) => {
+      const score = getCompleteScore(value as ScoreDraft);
+      if (score) {
+        nextScores[matchId] = score;
+      }
+    });
+
+    return nextScores;
+  };
+
   const importPredictionJson = () => {
     try {
       const parsed = JSON.parse(importText) as {
@@ -503,23 +536,9 @@ export default function WorldCupPredictor() {
         knockoutScores?: Record<string, unknown>;
       };
 
-      const nextScores: ScorePickMap = {};
-
-      Object.entries(parsed.groupScores ?? {}).forEach(([matchId, value]) => {
-        const score = getCompleteScore(value as ScoreDraft);
-        if (score) {
-          nextScores[matchId] = score;
-        }
-      });
-
-      Object.entries(parsed.knockoutScores ?? {}).forEach(([matchId, value]) => {
-        const score = getCompleteScore(value as ScoreDraft);
-        if (score) {
-          nextScores[matchId] = score;
-        }
-      });
-
+      const nextScores = buildScorePickMap(parsed.groupScores, parsed.knockoutScores);
       setScorePicks(nextScores);
+      setSubmissionId('');
       setImportMsg(`Prediccion cargada: ${Object.keys(nextScores).length} marcadores.`);
       setTimeout(() => setImportMsg(''), 2600);
     } catch {
@@ -530,8 +549,44 @@ export default function WorldCupPredictor() {
   const clearPrediction = () => {
     setScorePicks({});
     setImportText('');
+    setSubmissionId('');
+    setLoadSubmissionId('');
     setImportMsg('Prediccion limpiada.');
     setTimeout(() => setImportMsg(''), 1800);
+  };
+
+  const loadSavedPrediction = async () => {
+    const cleanSubmissionId = loadSubmissionId.trim();
+    if (!cleanSubmissionId) {
+      setLoadMsg('Ingresa el ID de comprobante.');
+      return;
+    }
+
+    setIsLoadingSubmission(true);
+    setLoadMsg('');
+
+    try {
+      const response = await fetch(`/api/ranking/submissions/${encodeURIComponent(cleanSubmissionId)}`);
+      if (!response.ok) {
+        throw new Error('No se pudo cargar la prediccion');
+      }
+
+      const data = (await response.json()) as { submission?: SavedPrediction };
+      if (!data.submission) {
+        throw new Error('Prediccion no encontrada');
+      }
+
+      const nextScores = buildScorePickMap(data.submission.groupScores, data.submission.knockoutScores);
+      setScorePicks(nextScores);
+      setPlayerName(data.submission.displayName);
+      setSubmissionId(data.submission.id);
+      setLoadSubmissionId(data.submission.id);
+      setLoadMsg(`Jugador cargado: ${data.submission.displayName}. Puedes seguir agregando marcadores.`);
+    } catch {
+      setLoadMsg('No se encontro ese ID o el backend no pudo cargarlo.');
+    } finally {
+      setIsLoadingSubmission(false);
+    }
   };
 
   const exportCurrentState = async () => {
@@ -554,31 +609,39 @@ export default function WorldCupPredictor() {
 
     setIsSubmitting(true);
     setSubmitMsg('');
-    setSubmissionId('');
 
     try {
       const payload = getPredictionPayload();
-      const response = await fetch('/api/ranking/submit', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      const updatingExistingSubmission = Boolean(submissionId);
+      const response = await fetch(
+        updatingExistingSubmission
+          ? `/api/ranking/submissions/${encodeURIComponent(submissionId)}`
+          : '/api/ranking/submit',
+        {
+          method: updatingExistingSubmission ? 'PUT' : 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            displayName: cleanName,
+            groupScores: payload.groupScores,
+            knockoutScores: payload.knockoutScores,
+          }),
         },
-        body: JSON.stringify({
-          displayName: cleanName,
-          groupScores: payload.groupScores,
-          knockoutScores: payload.knockoutScores,
-        }),
-      });
+      );
 
       if (!response.ok) {
         throw new Error('No se pudo enviar la prediccion');
       }
 
-      const data = (await response.json()) as { entry?: RankingEntry };
-      const nextSubmissionId = data.entry?.id ?? '';
+      const data = (await response.json()) as { entry?: RankingEntry; submission?: SavedPrediction };
+      const nextSubmissionId = data.entry?.id ?? data.submission?.id ?? submissionId;
       setSubmissionId(nextSubmissionId);
+      setLoadSubmissionId(nextSubmissionId);
       setSubmitMsg(
-        nextSubmissionId
+        updatingExistingSubmission
+          ? 'Prediccion actualizada. Conserva el mismo ID de comprobante.'
+          : nextSubmissionId
           ? 'Prediccion publicada. Guarda este ID para comprobar tu participacion.'
           : 'Prediccion publicada en el ranking.',
       );
@@ -791,6 +854,30 @@ export default function WorldCupPredictor() {
             </div>
           </div>
 
+          <div className="mb-4 rounded-2xl border border-blue-500/10 bg-black p-4">
+            <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Cargar jugador por ID
+            </label>
+            <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+              <input
+                type="text"
+                value={loadSubmissionId}
+                onChange={(event) => setLoadSubmissionId(event.target.value)}
+                placeholder="Pega el ID de comprobante"
+                className="w-full rounded-xl border border-blue-400/15 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+              />
+              <button
+                type="button"
+                onClick={loadSavedPrediction}
+                disabled={isLoadingSubmission}
+                className="rounded-xl border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isLoadingSubmission ? 'Cargando...' : 'Cargar jugador'}
+              </button>
+            </div>
+            {loadMsg ? <p className="mt-3 text-xs text-cyan-200">{loadMsg}</p> : null}
+          </div>
+
           <div className="mb-4 grid gap-3 rounded-2xl border border-blue-500/10 bg-black p-4 md:grid-cols-[1fr_auto]">
             <div>
               <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
@@ -811,7 +898,7 @@ export default function WorldCupPredictor() {
               disabled={isSubmitting}
               className="rounded-xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-70"
             >
-              {isSubmitting ? 'Publicando...' : 'Publicar en ranking'}
+              {isSubmitting ? 'Guardando...' : submissionId ? 'Actualizar prediccion' : 'Publicar en ranking'}
             </button>
           </div>
 

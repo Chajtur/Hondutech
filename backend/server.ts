@@ -42,6 +42,10 @@ type SubmissionDbRow = RowDataPacket & {
   submitted_at: string;
 };
 
+type SubmissionLookupDbRow = SubmissionDbRow & {
+  tournament_id: string;
+};
+
 type GroupPickDbRow = RowDataPacket & {
   submission_id: string;
   official_result: MatchOutcome | null;
@@ -89,6 +93,21 @@ type MatchAdminDbRow = RowDataPacket & {
 
 type IdDbRow = RowDataPacket & {
   id: string;
+};
+
+type SavedGroupPickDbRow = RowDataPacket & {
+  match_code: string;
+  picked_home_goals: number | null;
+  picked_away_goals: number | null;
+};
+
+type SavedKnockoutPickDbRow = RowDataPacket & {
+  match_code: string;
+  picked_team_code: string | null;
+  picked_home_team_code: string | null;
+  picked_away_team_code: string | null;
+  picked_home_goals: number | null;
+  picked_away_goals: number | null;
 };
 
 const app = express();
@@ -406,6 +425,206 @@ const getTeamIdByCode = async (connection: mysql.PoolConnection, teamCode: strin
   return rows[0]?.id;
 };
 
+const savePredictionPicks = async (
+  connection: mysql.PoolConnection,
+  submissionId: string,
+  groupEntries: Array<[string, MatchScore]>,
+  knockoutEntries: Array<[string, KnockoutScorePick]>,
+) => {
+  for (const [matchCode, pickedScore] of groupEntries) {
+    await connection.query(
+      `
+        insert into prediction_group_picks (
+          id,
+          submission_id,
+          match_id,
+          picked_result,
+          picked_home_goals,
+          picked_away_goals
+        )
+        select
+          uuid(),
+          ?,
+          m.id,
+          ?,
+          ?,
+          ?
+        from prediction_submissions s
+        join matches m
+          on m.tournament_id = s.tournament_id
+         and m.match_code = ?
+        where s.id = ?
+          and m.stage = 'group'
+          and m.is_locked = 0
+          and m.official_home_goals is null
+          and m.official_away_goals is null
+        on duplicate key update
+          picked_result = values(picked_result),
+          picked_home_goals = values(picked_home_goals),
+          picked_away_goals = values(picked_away_goals)
+      `,
+      [
+        submissionId,
+        getOutcomeFromScore(pickedScore),
+        pickedScore.homeGoals,
+        pickedScore.awayGoals,
+        matchCode,
+        submissionId,
+      ],
+    );
+  }
+
+  for (const [matchCode, pickedScore] of knockoutEntries) {
+    await connection.query(
+      `
+        insert into prediction_knockout_picks (
+          id,
+          submission_id,
+          match_id,
+          picked_team_id,
+          picked_home_team_id,
+          picked_away_team_id,
+          picked_home_goals,
+          picked_away_goals
+        )
+        select
+          uuid(),
+          ?,
+          m.id,
+          tw.id,
+          th.id,
+          ta.id,
+          ?,
+          ?
+        from prediction_submissions s
+        join matches m
+          on m.tournament_id = s.tournament_id
+         and m.match_code = ?
+        join teams tw
+          on tw.team_code = ?
+        join teams th
+          on th.team_code = ?
+        join teams ta
+          on ta.team_code = ?
+        where s.id = ?
+          and m.stage <> 'group'
+          and m.is_locked = 0
+          and m.official_home_goals is null
+          and m.official_away_goals is null
+        on duplicate key update
+          picked_team_id = values(picked_team_id),
+          picked_home_team_id = values(picked_home_team_id),
+          picked_away_team_id = values(picked_away_team_id),
+          picked_home_goals = values(picked_home_goals),
+          picked_away_goals = values(picked_away_goals)
+      `,
+      [
+        submissionId,
+        pickedScore.homeGoals,
+        pickedScore.awayGoals,
+        matchCode,
+        pickedScore.winnerTeamId,
+        pickedScore.homeTeamId,
+        pickedScore.awayTeamId,
+        submissionId,
+      ],
+    );
+  }
+};
+
+const getSubmissionPredictionFromDb = async (submissionId: string) => {
+  const [submissionRows] = await dbPool.query<SubmissionLookupDbRow[]>(
+    `
+      select
+        s.id,
+        s.tournament_id,
+        p.display_name,
+        s.submitted_at
+      from prediction_submissions s
+      join predictor_players p on p.id = s.player_id
+      join tournaments t on t.id = s.tournament_id
+      where s.id = ?
+        and t.code = ?
+      limit 1
+    `,
+    [submissionId, tournamentCode],
+  );
+
+  const submission = submissionRows[0];
+  if (!submission) return undefined;
+
+  const [groupRows] = await dbPool.query<SavedGroupPickDbRow[]>(
+    `
+      select
+        m.match_code,
+        gp.picked_home_goals,
+        gp.picked_away_goals
+      from prediction_group_picks gp
+      join matches m on m.id = gp.match_id
+      where gp.submission_id = ?
+      order by m.match_code asc
+    `,
+    [submissionId],
+  );
+
+  const [knockoutRows] = await dbPool.query<SavedKnockoutPickDbRow[]>(
+    `
+      select
+        m.match_code,
+        tw.team_code as picked_team_code,
+        th.team_code as picked_home_team_code,
+        ta.team_code as picked_away_team_code,
+        kp.picked_home_goals,
+        kp.picked_away_goals
+      from prediction_knockout_picks kp
+      join matches m on m.id = kp.match_id
+      left join teams tw on tw.id = kp.picked_team_id
+      left join teams th on th.id = kp.picked_home_team_id
+      left join teams ta on ta.id = kp.picked_away_team_id
+      where kp.submission_id = ?
+      order by m.match_code asc
+    `,
+    [submissionId],
+  );
+
+  const groupScores = groupRows.reduce<Record<string, MatchScore>>((acc, row) => {
+    if (row.picked_home_goals !== null && row.picked_away_goals !== null) {
+      acc[row.match_code] = {
+        homeGoals: Number(row.picked_home_goals),
+        awayGoals: Number(row.picked_away_goals),
+      };
+    }
+    return acc;
+  }, {});
+
+  const knockoutScores = knockoutRows.reduce<Record<string, KnockoutScorePick>>((acc, row) => {
+    if (
+      row.picked_home_goals !== null &&
+      row.picked_away_goals !== null &&
+      row.picked_team_code &&
+      row.picked_home_team_code &&
+      row.picked_away_team_code
+    ) {
+      acc[row.match_code] = {
+        homeGoals: Number(row.picked_home_goals),
+        awayGoals: Number(row.picked_away_goals),
+        winnerTeamId: row.picked_team_code,
+        homeTeamId: row.picked_home_team_code,
+        awayTeamId: row.picked_away_team_code,
+      };
+    }
+    return acc;
+  }, {});
+
+  return {
+    id: submission.id,
+    displayName: submission.display_name,
+    submittedAt: new Date(submission.submitted_at).toISOString(),
+    groupScores,
+    knockoutScores,
+  };
+};
+
 app.get('/api/health', async (_req, res) => {
   try {
     await dbPool.query('select 1');
@@ -563,95 +782,7 @@ app.post('/api/ranking/submit', async (req, res) => {
       throw new Error('No existe el torneo configurado para guardar la prediccion');
     }
 
-    for (const [matchCode, pickedScore] of groupEntries) {
-      await connection.query(
-        `
-          insert into prediction_group_picks (
-            id,
-            submission_id,
-            match_id,
-            picked_result,
-            picked_home_goals,
-            picked_away_goals
-          )
-          select
-            uuid(),
-            ?,
-            m.id,
-            ?,
-            ?,
-            ?
-          from prediction_submissions s
-          join matches m
-            on m.tournament_id = s.tournament_id
-           and m.match_code = ?
-          where s.id = ?
-            and m.stage = 'group'
-            and m.is_locked = 0
-            and m.official_home_goals is null
-            and m.official_away_goals is null
-        `,
-        [
-          submissionId,
-          getOutcomeFromScore(pickedScore),
-          pickedScore.homeGoals,
-          pickedScore.awayGoals,
-          matchCode,
-          submissionId,
-        ],
-      );
-    }
-
-    for (const [matchCode, pickedScore] of knockoutEntries) {
-      await connection.query(
-        `
-          insert into prediction_knockout_picks (
-            id,
-            submission_id,
-            match_id,
-            picked_team_id,
-            picked_home_team_id,
-            picked_away_team_id,
-            picked_home_goals,
-            picked_away_goals
-          )
-          select
-            uuid(),
-            ?,
-            m.id,
-            tw.id,
-            th.id,
-            ta.id,
-            ?,
-            ?
-          from prediction_submissions s
-          join matches m
-            on m.tournament_id = s.tournament_id
-           and m.match_code = ?
-          join teams tw
-            on tw.team_code = ?
-          join teams th
-            on th.team_code = ?
-          join teams ta
-            on ta.team_code = ?
-          where s.id = ?
-            and m.stage <> 'group'
-            and m.is_locked = 0
-            and m.official_home_goals is null
-            and m.official_away_goals is null
-        `,
-        [
-          submissionId,
-          pickedScore.homeGoals,
-          pickedScore.awayGoals,
-          matchCode,
-          pickedScore.winnerTeamId,
-          pickedScore.homeTeamId,
-          pickedScore.awayTeamId,
-          submissionId,
-        ],
-      );
-    }
+    await savePredictionPicks(connection, submissionId, groupEntries, knockoutEntries);
 
     await connection.commit();
   } catch (error) {
@@ -678,6 +809,79 @@ app.post('/api/ranking/submit', async (req, res) => {
   };
 
   res.status(201).json({ entry });
+});
+
+app.get('/api/ranking/submissions/:submissionId', async (req, res) => {
+  try {
+    const submission = await getSubmissionPredictionFromDb(req.params.submissionId);
+    if (!submission) {
+      res.status(404).json({ error: 'Prediccion no encontrada' });
+      return;
+    }
+
+    res.json({ submission });
+  } catch (error) {
+    console.error('Error loading submission prediction', error);
+    if (isMissingScoreMigrationError(error)) {
+      res.status(500).json({ error: 'Falta ejecutar backend/sql/04_score_prediction_upgrade.sql en la base de datos' });
+      return;
+    }
+
+    res.status(500).json({ error: 'No se pudo cargar la prediccion' });
+  }
+});
+
+app.put('/api/ranking/submissions/:submissionId', async (req, res) => {
+  const submissionId = req.params.submissionId;
+  const payload = {
+    groupScores: normalizeGroupScores(req.body?.groupScores),
+    knockoutScores: normalizeKnockoutScores(req.body?.knockoutScores),
+  };
+  const groupEntries = Object.entries(payload.groupScores);
+  const knockoutEntries = Object.entries(payload.knockoutScores);
+  let connection: mysql.PoolConnection | undefined;
+
+  try {
+    connection = await dbPool.getConnection();
+    await connection.beginTransaction();
+
+    const [submissionRows] = await connection.query<IdDbRow[]>(
+      `
+        select s.id
+        from prediction_submissions s
+        join tournaments t on t.id = s.tournament_id
+        where s.id = ?
+          and t.code = ?
+        limit 1
+      `,
+      [submissionId, tournamentCode],
+    );
+
+    if (!submissionRows[0]?.id) {
+      await connection.rollback();
+      res.status(404).json({ error: 'Prediccion no encontrada' });
+      return;
+    }
+
+    await savePredictionPicks(connection, submissionId, groupEntries, knockoutEntries);
+    await connection.commit();
+
+    const submission = await getSubmissionPredictionFromDb(submissionId);
+    res.json({ submission });
+  } catch (error) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.error('Error updating submission prediction', error);
+    if (isMissingScoreMigrationError(error)) {
+      res.status(500).json({ error: 'Falta ejecutar backend/sql/04_score_prediction_upgrade.sql en la base de datos' });
+      return;
+    }
+
+    res.status(500).json({ error: 'No se pudo actualizar la prediccion' });
+  } finally {
+    connection?.release();
+  }
 });
 
 app.post('/api/admin/matches/:matchCode/result', async (req, res) => {
