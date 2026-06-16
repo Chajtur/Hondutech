@@ -902,7 +902,7 @@ export default function WorldCupPredictor() {
           <div className="mb-4 grid gap-3 rounded-2xl border border-blue-500/10 bg-black p-4 md:grid-cols-[1fr_auto]">
             <div>
               <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-                Nombre para ranking publico
+                Nombre para ranking público
               </label>
               <input
                 type="text"
@@ -1035,7 +1035,7 @@ export default function WorldCupPredictor() {
 
         <section className="mb-10 rounded-3xl border border-blue-500/10 bg-slate-950 p-6">
           <div className="mb-4 flex items-center justify-between gap-3">
-            <h3 className="text-2xl font-semibold">Ranking publico de aciertos</h3>
+            <h3 className="text-2xl font-semibold">Ranking público de aciertos</h3>
             <button
               type="button"
               onClick={fetchRanking}
@@ -1048,7 +1048,7 @@ export default function WorldCupPredictor() {
           {rankingLoading ? (
             <p className="text-sm text-slate-400">Cargando ranking...</p>
           ) : ranking.length === 0 ? (
-            <p className="text-sm text-slate-400">Aun no hay predicciones publicadas.</p>
+            <p className="text-sm text-slate-400">Aún no hay predicciones publicadas.</p>
           ) : (
             <div className="overflow-x-auto rounded-2xl border border-blue-500/10">
               <table className="min-w-[620px] text-left text-sm text-slate-200">
@@ -1058,7 +1058,7 @@ export default function WorldCupPredictor() {
                     <th className="px-3 py-3">Jugador</th>
                     <th className="px-3 py-3">Puntaje</th>
                     <th className="px-3 py-3">Marcadores</th>
-                    <th className="px-3 py-3">Precision</th>
+                    <th className="px-3 py-3">Precisión</th>
                     <th className="px-3 py-3">Fecha</th>
                   </tr>
                 </thead>
