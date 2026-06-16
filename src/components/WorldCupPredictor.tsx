@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   worldCup2026Data,
   type GroupMatch,
@@ -201,6 +201,7 @@ const trimScorePicks = (picks: ScorePickMap, stage: string): ScorePickMap => {
 };
 
 export default function WorldCupPredictor() {
+  const predictorSectionRef = useRef<HTMLElement | null>(null);
   const [scorePicks, setScorePicks] = useState<ScorePickMap>({});
   const [officialMatches, setOfficialMatches] = useState<Record<string, OfficialMatchStatus>>({});
   const [copyMsg, setCopyMsg] = useState('');
@@ -225,6 +226,7 @@ export default function WorldCupPredictor() {
   const [adminWinnerTeamCode, setAdminWinnerTeamCode] = useState('');
   const [adminMsg, setAdminMsg] = useState('');
   const [isSavingAdminResult, setIsSavingAdminResult] = useState(false);
+  const [isPredictorVisible, setIsPredictorVisible] = useState(false);
 
   const getOfficialStatus = useCallback((matchId: string) => officialMatches[matchId], [officialMatches]);
 
@@ -443,6 +445,21 @@ export default function WorldCupPredictor() {
   useEffect(() => {
     void fetchMatchStatus();
     void fetchRanking();
+  }, []);
+
+  useEffect(() => {
+    const section = predictorSectionRef.current;
+    if (!section) return undefined;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        setIsPredictorVisible(entry.isIntersecting);
+      },
+      { threshold: 0.02 },
+    );
+
+    observer.observe(section);
+    return () => observer.disconnect();
   }, []);
 
   const updateScore = (matchId: string, side: keyof MatchScore, rawValue: string, stage?: string) => {
@@ -793,8 +810,12 @@ export default function WorldCupPredictor() {
   );
 
   return (
-    <section id="worldcup" className="border-y border-blue-500/10 bg-gradient-to-b from-slate-950 to-black">
-      <div className="mx-auto max-w-7xl px-6 py-16 lg:px-8">
+    <section
+      id="worldcup"
+      ref={predictorSectionRef}
+      className="border-y border-blue-500/10 bg-gradient-to-b from-slate-950 to-black"
+    >
+      <div className="mx-auto max-w-7xl px-6 pb-32 pt-16 md:py-16 lg:px-8">
         <div className="mb-10 max-w-4xl">
           <p className="text-sm font-semibold uppercase tracking-[0.25em] text-cyan-300">Beneficio Mundial</p>
           <h2 className="mt-3 text-3xl font-bold sm:text-4xl">World Cup Predictor por marcador</h2>
@@ -1170,6 +1191,29 @@ export default function WorldCupPredictor() {
           </div>
         </div>
       </div>
+
+      {isPredictorVisible ? (
+        <div className="fixed inset-x-0 bottom-0 z-50 border-t border-cyan-300/20 bg-slate-950/95 px-4 py-3 shadow-2xl shadow-black/40 backdrop-blur md:hidden">
+          <div className="mx-auto flex max-w-7xl items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs font-semibold text-slate-200">
+                {submissionId ? 'Prediccion cargada' : 'World Cup Predictor'}
+              </p>
+              <p className="truncate text-[11px] text-slate-400">
+                {playerName.trim() || 'Ingresa tu nombre antes de publicar'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={submitToRanking}
+              disabled={isSubmitting}
+              className="shrink-0 rounded-xl bg-cyan-400 px-4 py-3 text-xs font-semibold text-slate-950 shadow-lg shadow-cyan-950/30 transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70"
+            >
+              {isSubmitting ? 'Guardando...' : submissionId ? 'Actualizar' : 'Publicar'}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
