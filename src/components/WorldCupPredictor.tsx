@@ -734,7 +734,7 @@ export default function WorldCupPredictor() {
   };
 
   const renderScoreInputs = (matchId: string, options?: { locked?: boolean; stage?: string; officialScore?: MatchScore }) => {
-    const score = options?.officialScore ?? scorePicks[matchId] ?? {};
+    const score = scorePicks[matchId] ?? options?.officialScore ?? {};
     const disabled = Boolean(options?.locked);
 
     return (
