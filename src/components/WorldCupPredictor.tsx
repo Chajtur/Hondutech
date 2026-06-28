@@ -156,7 +156,7 @@ const resolveSlotTeam = (
   thirdByGroup: Record<string, Team>,
   usedThirdGroups: Set<string>,
 ): Team => {
-  if (/^[12][A-Z]$/.test(slot)) {
+  if (/^[123][A-Z]$/.test(slot)) {
     const position = Number(slot[0]);
     const groupCode = slot[1];
     const row = tablesByGroup[groupCode]?.[position - 1];
@@ -183,6 +183,21 @@ const resolveSlotTeam = (
 };
 
 const stageOrder = ['r32', 'r16', 'qf', 'sf', 'final'];
+
+const knockoutMetadataById: Record<string, { label: string; kickoff: string }> = {
+  'r16-1': { label: 'Octavos 1', kickoff: 'Sab 4 Jul 2026 · 15:00' },
+  'r16-2': { label: 'Octavos 2', kickoff: 'Sab 4 Jul 2026 · 11:00' },
+  'r16-3': { label: 'Octavos 3', kickoff: 'Lun 6 Jul 2026 · 13:00' },
+  'r16-4': { label: 'Octavos 4', kickoff: 'Lun 6 Jul 2026 · 18:00' },
+  'r16-5': { label: 'Octavos 5', kickoff: 'Dom 5 Jul 2026 · 14:00' },
+  'r16-6': { label: 'Octavos 6', kickoff: 'Dom 5 Jul 2026 · 18:00' },
+  'r16-7': { label: 'Octavos 7', kickoff: 'Mar 7 Jul 2026 · 10:00' },
+  'r16-8': { label: 'Octavos 8', kickoff: 'Mar 7 Jul 2026 · 14:00' },
+  'qf-1': { label: 'Cuartos 1', kickoff: 'Jue 9 Jul 2026 · 14:00' },
+  'qf-2': { label: 'Cuartos 2', kickoff: 'Vie 10 Jul 2026 · 13:00' },
+  'qf-3': { label: 'Cuartos 3', kickoff: 'Sab 11 Jul 2026 · 15:00' },
+  'qf-4': { label: 'Cuartos 4', kickoff: 'Sab 11 Jul 2026 · 19:00' },
+};
 
 const trimScorePicks = (picks: ScorePickMap, stage: string): ScorePickMap => {
   const stageIndex = stageOrder.indexOf(stage);
@@ -284,10 +299,11 @@ export default function WorldCupPredictor() {
     const list: KnockoutMatch[] = [];
     for (let i = 0; i < participants.length; i += 2) {
       const id = `${targetPrefix}-${Math.floor(i / 2) + 1}`;
+      const metadata = knockoutMetadataById[id];
       list.push({
         id,
-        label,
-        kickoff: '',
+        label: metadata?.label ?? label,
+        kickoff: metadata?.kickoff ?? '',
         home: participants[i],
         away: participants[i + 1],
         officialWinnerTeamId: getOfficialWinnerTeamId(id),
